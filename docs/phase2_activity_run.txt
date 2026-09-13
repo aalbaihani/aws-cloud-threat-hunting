@@ -1,0 +1,81 @@
+~ $ aws s3 ls s3://aws-cloudtrail-logs-<ACCOUNT_ID>-4628fc5b/AWSLogs/<ACCOUNT_ID>/CloudTrail/ --recursive | head
+2026-09-13 11:08:03          0 AWSLogs/<ACCOUNT_ID>/CloudTrail/
+2026-09-13 11:11:50      20850 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1115Z_etPKG43s5AVKQtMd.json.gz
+2026-09-13 11:16:41      39617 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1120Z_6n5LaYy7iiji7Iit.json.gz
+2026-09-13 11:21:32      55951 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1125Z_bMgLKq7R1wUW1Yvq.json.gz
+2026-09-13 11:33:03       4120 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1130Z_9cG6iEXwBFxWnrCe.json.gz
+2026-09-13 11:26:23      48339 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1130Z_TdBzluMdEZOFgLBZ.json.gz
+2026-09-13 11:31:14      39067 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1135Z_w627e1CzFNPzPq3m.json.gz
+2026-09-13 11:36:05      57471 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1140Z_DbS7eA2PvTYL8IKT.json.gz
+2026-09-13 11:42:45        609 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1140Z_kCkLetCwTNTQCFPd.json.gz
+2026-09-13 11:41:06      43689 AWSLogs/<ACCOUNT_ID>/CloudTrail/ap-southeast-2/2026/09/13/<ACCOUNT_ID>_CloudTrail_ap-southeast-2_20260913T1145Z_FxXYgJQPKDq4SPos.json.gz
+
+~ $ ACCID=$(aws sts get-caller-identity --query Account --output text)
+~ $ REGION=ap-southeast-2
+~ $ STAMP=$(date +%s)
+~ $ TRAIL=cyberlab-management-trail
+~ $ echo ">> Account $ACCID  Region $REGION"
+>> Account <ACCOUNT_ID>  Region ap-southeast-2
+
+~ $ echo ">> [1] Discovery: IAM enumeration"
+>> [1] Discovery: IAM enumeration
+~ $ aws iam list-users        --query 'Users[].UserName'   --output table
+---------------
+|  ListUsers  |
++-------------+
+|  ali-admin  |
++-------------+
+~ $ aws iam list-roles        --query 'Roles[].RoleName'   --output table
+---------------------------------------
+|              ListRoles              |
++-------------------------------------+
+|  AWSServiceRoleForResourceExplorer  |
+|  AWSServiceRoleForSupport           |
+|  AWSServiceRoleForTrustedAdvisor    |
++-------------------------------------+
+~ $ aws iam list-policies --scope Local --query 'Policies[].PolicyName' --output table
+~ $ aws iam get-account-authorization-details --max-items 5 >/dev/null
+
+~ $ echo ">> [2] Persistence: access key on ali-admin"
+>> [2] Persistence: access key on ali-admin
+~ $ KEYID=$(aws iam create-access-key --user-name ali-admin --query 'AccessKey.AccessKeyId' --output text)
+~ $ echo "   created $KEYID"; aws iam delete-access-key --user-name ali-admin --access-key-id "$KEYID"
+   created <REDACTED>
+~ $ echo "   deleted $KEYID"
+   deleted <REDACTED>
+
+~ $ echo ">> [3] Rogue account creation"
+>> [3] Rogue account creation
+~ $ aws iam create-user       --user-name backdoor-$STAMP >/dev/null
+~ $ aws iam attach-user-policy --user-name backdoor-$STAMP --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+~ $ aws iam detach-user-policy --user-name backdoor-$STAMP --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+~ $ aws iam delete-user        --user-name backdoor-$STAMP
+~ $ echo "   removed backdoor-$STAMP"
+   removed backdoor-1789308879
+
+~ $ echo ">> [4] S3: weaken then restore public-access block"
+>> [4] S3: weaken then restore public-access block
+~ $ VICTIM=cyberlab-victim-$ACCID-$STAMP
+~ $ aws s3api create-bucket --bucket "$VICTIM" --region $REGION \
+>   --create-bucket-configuration LocationConstraint=$REGION >/dev/null
+~ $ aws s3api delete-public-access-block --bucket "$VICTIM"
+~ $ aws s3api put-public-access-block --bucket "$VICTIM" \
+>   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+~ $ aws s3api delete-bucket --bucket "$VICTIM"
+~ $ echo "   removed $VICTIM"
+   removed cyberlab-victim-<ACCOUNT_ID>-1789308879
+
+~ $ echo ">> [5] Failed AssumeRole (expected to fail)"
+>> [5] Failed AssumeRole (expected to fail)
+~ $ aws sts assume-role --role-arn arn:aws:iam::$ACCID:role/does-not-exist-$STAMP \
+>   --role-session-name evil 2>&1 | head -2 || true
+
+aws: [ERROR]: An error occurred (AccessDenied) when calling the AssumeRole operation: User: arn:aws:iam::<ACCOUNT_ID>:user/ali-admin is not authorized to perform: sts:AssumeRole on resource: arn:aws:iam::<ACCOUNT_ID>:role/does-not-exist-1789308879
+
+~ $ echo ">> [6] CloudTrail StopLogging -> StartLogging"
+>> [6] CloudTrail StopLogging -> StartLogging
+~ $ aws cloudtrail stop-logging  --name $TRAIL
+~ $ sleep 5
+~ $ aws cloudtrail start-logging --name $TRAIL
+~ $ echo ">> Phase 2 complete. Wait ~15 min for delivery, then we hunt."
+>> Phase 2 complete. Wait ~15 min for delivery, then we hunt.
