@@ -1,0 +1,3 @@
+"eventTime","eventName","actor","actor_arn","target_user","target_role","sourceIPAddress","errorCode"
+"2026-09-19T16:04:32Z","CreateUser","ali-admin","arn:aws:iam::<ACCOUNT_ID>:user/ali-admin","hunt-test-user",,"3.27.32.76",
+"2026-09-19T16:04:41Z","CreateAccessKey","ali-admin","arn:aws:iam::<ACCOUNT_ID>:user/ali-admin","hunt-test-user",,"3.27.32.76",

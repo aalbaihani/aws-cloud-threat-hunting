@@ -1,0 +1,3 @@
+"event_time","eventName","actor","trail_name","sourceIPAddress","errorCode","next_trail_event_time","next_trail_event","seconds_until_next","assessment"
+"2026-09-19 16:05:24.000 UTC","StopLogging","ali-admin","cloud-threat-hunting-trail","3.27.32.76",,"2026-09-19 16:06:25.000 UTC","StartLogging","61","HIGH - logging disabled"
+"2026-09-19 16:06:25.000 UTC","StartLogging","ali-admin","cloud-threat-hunting-trail","3.27.32.76",,,,,"INFO"

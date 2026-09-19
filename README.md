@@ -1,95 +1,109 @@
-# AWS Cloud Threat Hunting — CloudTrail + Athena
+# AWS Cloud Threat Hunting Lab
 
-Detection engineering in the cloud control plane. This lab provisions CloudTrail management-event logging, generates a set of reversible adversary actions mapped to MITRE ATT&CK, and hunts them with Amazon Athena SQL over the raw logs in S3.
+CloudTrail → S3 → Athena detection pipeline, built and validated on a live AWS account. Five hunting queries mapped to MITRE ATT&CK Cloud techniques, each tested against attack activity generated in the account rather than against synthetic data.
 
-It is the third project in a detection-engineering portfolio:
-
-1. **[mitre-soc-detection-lab-arm64](https://github.com/aalbaihani/mitre-soc-detection-lab-arm64)** — endpoint detection (Sysmon → Splunk, T1059.001 & T1003.001)
-2. **[soar-shuffle-automation](https://github.com/aalbaihani/soar-shuffle-automation)** — automated response (Shuffle SOAR, IOC enrichment)
-3. **This repo** — the same detection thinking applied to cloud audit logs
-
-Built and proven end to end in `ap-southeast-2` on an AWS Free-plan account. Every result shown is from this deployment; the failures and workarounds are documented rather than hidden.
-
----
+This is Project 3 of a security portfolio. Project 1 covered endpoint detection engineering (Sysmon → Splunk, Windows ARM64); Project 2 covered SOAR automation (Shuffle → VirusTotal enrichment). This one moves from host telemetry into cloud control-plane telemetry.
 
 ## Architecture
 
 ```
-        Adversary actions (scripts/generate_activity.sh)
-                        │  reversible IAM / S3 / CloudTrail API calls
-                        ▼
-                   CloudTrail  ──►  S3 (management events, JSON.gz)
-                        │
-                        ▼
-     Athena external table (cloudtrail_logs)  ──►  6 detection queries
-                        │
-                        ▼
-            Attack chain reconstructed from audit logs
+AWS API activity (all regions)
+        │
+        ▼
+   CloudTrail trail  ──  multi-region, log file validation enabled
+        │
+        │  batched delivery, 5–15 min
+        ▼
+   S3 bucket  ──  SSE-S3, public access blocked, 30-day lifecycle
+        │         AWSLogs/<account>/CloudTrail/<region>/<yyyy>/<mm>/<dd>/
+        ▼
+   Athena external table  ──  partition projection on (region, dt)
+        │
+        ▼
+   Five ATT&CK-mapped hunting queries  →  CSV results
 ```
 
-- **Telemetry:** a single multi-region CloudTrail trail, management events only, SSE-S3 (no KMS billing), log-file validation enabled.
-- **Query engine:** Athena SQL (engine v3) reading the CloudTrail JSON in place via the AWS CloudTrail SerDe — no data copied.
-- **Cost:** log volume is a few MB; at $5/TB scanned, each query costs a fraction of a cent. The trail's management events are free.
+| Component | Value |
+|---|---|
+| Region | ap-southeast-2 (Sydney) |
+| Trail | multi-region, global service events on, log file validation on |
+| Partitioning | projection on `region` (enum) and `dt` (date), no `MSCK REPAIR` |
+| Cost per full query pass | ~850 KB scanned, well under one cent |
 
----
+## Detection coverage
 
-## The adversary activity
+| # | Technique | ID | Rows (tuned) | Validated against |
+|---|---|---|---|---|
+| 01 | Create Account: Cloud Account | T1136.003 | 2 | `CreateUser` + `CreateAccessKey` |
+| 02 | Account Manipulation | T1098 | 1 | AdministratorAccess granted 2s after user creation |
+| 03 | Impair Defenses: Disable Cloud Logs | T1562.008 | 2 | `StopLogging` → `StartLogging`, 61s apart |
+| 04 | Cloud Infrastructure Discovery | T1580 | 2 | IAM/S3/EC2 enumeration burst |
+| 05 | Valid Accounts: Cloud Accounts | T1078.004 | 0 | no auth anomalies present — correct result |
 
-`scripts/generate_activity.sh` performs six reversible actions, each mapped to a technique. Every throwaway resource is cleaned up inline; nothing persists.
+Query files are in `queries/`, result CSVs in `results/<date>/`.
 
-| # | Action | MITRE ATT&CK |
-|---|--------|--------------|
-| 1 | IAM enumeration (`ListUsers`, `ListRoles`, `ListPolicies`, `GetAccountAuthorizationDetails`) | T1087 Account Discovery / T1069 Permission Groups Discovery |
-| 2 | Create then delete an access key on the admin user | T1098 Account Manipulation |
-| 3 | Create a backdoor user, grant then revoke `AdministratorAccess`, delete | T1136 Create Account / T1098 |
-| 4 | Create an S3 bucket, drop then restore its public-access block, delete | T1562 Impair Defenses |
-| 5 | `AssumeRole` against a nonexistent role (denied) | T1078 Valid Accounts (failed) |
-| 6 | `StopLogging` → `StartLogging` on the trail | T1562.001 Disable/Modify Cloud Logs |
+## The finding that matters: tuning
 
----
+The first run of the full query set returned **22 rows**. Fifteen of them were AWS console background activity — `GetAccountColor`, `GetAccountPlanState` and `ListDomains` polling every few minutes from the browser session, plus `AccessDenied` responses to those same calls.
 
-## Detections
+| | First run | After tuning |
+|---|---|---|
+| 01 account creation | 2 | 2 |
+| 02 privilege escalation | 1 | 1 |
+| 03 impair logging | 2 | 2 |
+| 04 discovery burst | 9 | 2 |
+| 05 valid accounts | 8 | 0 |
+| **Total** | **22** | **7** |
 
-Six Athena queries in `queries/detections.sql`, one per technique. Full run transcript in `docs/`; screenshots in `screenshots/`.
+Every row that survives is real activity. The seven that were removed were removed because the noise was identified and excluded, not because the threshold was raised until the output looked clean.
 
-| ID | Detects | Key signal | Result |
-|----|---------|-----------|--------|
-| D1 | CloudTrail logging disabled | `StopLogging` / `StartLogging` events | ✅ 14:15:06 → 14:15:12 |
-| D2 | Rogue admin account lifecycle | `CreateUser` → `AttachUserPolicy` → `DetachUserPolicy` → `DeleteUser` | ✅ 14:14:54 → 14:14:59 |
-| D3 | Persistence via access key | `CreateAccessKey` | ✅ 14:14:51 |
-| D4 | S3 public-access block changed | `PutBucketPublicAccessBlock` / `DeletePublicAccessBlock` | ✅ 14:15:03 |
-| D5 | Failed privilege use | non-null `errorCode` on sensitive calls | ✅ `AccessDenied` on `AssumeRole`, 14:15:05 |
-| D6 | IAM discovery burst | ≥3 IAM `List*`/`Get*` calls per minute | ✅ 4 calls at 14:14 |
+This matters more than the queries themselves. `errorCode = 'AccessDenied'` looks like a reasonable detection signal and is close to useless on its own — legitimate tooling generates it constantly. A query validated only against planted attack data will never reveal that.
 
-**D1 is the highest-fidelity detection.** An attacker disabling audit logging is a rare, high-signal event — and the `StopLogging` API call is itself recorded before logging pauses. The captured `userAgent` even preserves the exact CLI command (`...md/command#cloudtrail.stop-logging`).
+## What the data actually showed
 
-The full attack chain reconstructs cleanly from the audit trail, in order, all originating from a single source IP within a ~20-second window.
+**Privilege escalation was two seconds wide.** `CreateUser` at 16:04:32, `AttachUserPolicy` granting AdministratorAccess at 16:04:34. Query 02 correlates the two and reports the interval, which is a stronger signal than either event alone.
 
----
+**`StopLogging` is not instantaneous.** Events were still being recorded 53 seconds after the call. The 61-second interval between stop and start is therefore an upper bound on the blind window, not its measured width. Query 03 reports it as such.
 
-## Gotchas (the parts tutorials skip)
+**Absence of an event is not evidence it didn't happen.** Three IAM deletions that completed successfully were still missing from S3 twenty minutes later. Global IAM events route through `us-east-1` and deliver on a slower cadence than regional batches. Any detection that infers suppression from a quiet window will fire on delivery lag alone.
 
-Documenting these honestly is the point — each was a real obstacle with a real fix.
+## Reproducing
 
-- **Free-plan time window.** The account runs on AWS's post-July-2025 Free plan: credit-based, ~6-month window, not the legacy 12-month tier. The lab is built to be self-contained so the repo stands alone as evidence after the account expires.
-- **Athena workgroup engine.** The default `primary` workgroup ran the Trino engine, which rejects Hive `CREATE EXTERNAL TABLE` (`mismatched input 'EXTERNAL'`). Fixed by creating a dedicated workgroup pinned to **Athena engine version 3**.
-- **CloudTrail SerDe vs. JSON blobs.** The generic JSON SerDe returns zero rows for CloudTrail (it doesn't unwrap the `Records` array). The AWS `CloudTrailSerde` does — but it maps `requestParameters`, `responseElements`, and `additionalEventData` as `STRING` while CloudTrail emits them as variable JSON objects, causing `HIVE_BAD_DATA`. Those columns are excluded from the schema.
-- **The `userIdentity` struct.** The SerDe requires `userIdentity` declared as a `STRUCT`, but selecting any sub-field (`userIdentity.userName`, `.arn`) throws `HIVE_BAD_DATA` because failed and service-linked events carry variant `userIdentity` shapes. Detections therefore key on scalar top-level fields (`sourceIPAddress`, `errorCode`, `eventName`). This is an accepted trade-off — the scalar fields carry the detection signal.
-- **D4 event source.** The public-access-block *restore* (`PutBucketPublicAccessBlock`) was captured; the *removal* (`DeletePublicAccessBlock`) logs under a different event source and did not surface in the management-event trail. The configuration change is still detected — arguably the `Put` is the more suspicious of the pair.
+```bash
+# 1. Infrastructure — see docs/ for the full walkthrough
+# 2. Generate activity to hunt
+./scripts/generate_activity.sh
 
----
+# 3. Create the Athena table (run once)
+#    queries/00-create-table.sql
 
-## Reproducing this
+# 4. Run the hunt
+chmod +x scripts/run-hunt.sh
+./scripts/run-hunt.sh 2026/09/19
+```
 
-1. Create a CloudTrail trail (management events, S3 destination, SSE-S3, validation on).
-2. Run `scripts/generate_activity.sh` from CloudShell (uses the caller's IAM identity; region `ap-southeast-2`).
-3. Wait ~15 min for log delivery to S3.
-4. Create an Athena SQL v3 workgroup and set a query-result bucket.
-5. Create the table from `queries/00_create_table.sql` (substitute your account ID and bucket).
-6. Run the detections in `queries/detections.sql`.
+`run-hunt.sh` substitutes the partition date, submits each query, polls for completion, and writes one CSV per technique to `results/<date>/` with row counts and bytes scanned.
 
-All queries were executed through the AWS CLI (`aws athena start-query-execution`) rather than the console query editor — see `docs/` for the wrapper used.
+Requires an authenticated AWS CLI. AWS CloudShell is the simplest option — pre-authenticated, no long-lived access key on a local machine.
 
----
+## Known limitations
 
-*Region: ap-southeast-2 · Timestamps in UTC · Account identifiers redacted throughout.*
+**Struct field access is not guaranteed safe.** The queries select `userIdentity.userName`, `userIdentity.invokedBy` and `userIdentity.sessionContext.attributes.mfaAuthenticated`. These worked against every event in this dataset, but CloudTrail's `userIdentity` shape varies by event type and a variant-shaped record can raise `HIVE_BAD_DATA` when sub-fields are selected. A production version would either guard these with `try()` or key on scalar top-level columns only.
+
+**Thresholds are calibrated to an almost-empty account.** `distinct_apis >= 3` in query 04 would fire constantly in a real environment. The threshold has to come from a baseline of actual traffic.
+
+**No data events.** Only management events are captured. S3 object-level and Lambda invocation activity is invisible to this pipeline, which is a deliberate cost decision, not an oversight.
+
+**Single-account scope.** No organisation trail, no cross-account role assumption paths, and no GuardDuty correlation.
+
+**Query 05 is under-tested.** It returns zero rows because the account has no failed console logins or MFA-less access to find. Correct, but untested against positive cases.
+
+## Repository layout
+
+```
+queries/     00-create-table.sql + five ATT&CK-mapped hunting queries
+scripts/     generate_activity.sh (attack simulation), run-hunt.sh (runner)
+results/     query output CSVs by date
+docs/        build notes and activity run logs
+screenshots/ evidence captures
+```

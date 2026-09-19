@@ -1,0 +1,3 @@
+"bucket_start","principal","sourceIPAddress","call_count","distinct_apis","distinct_services","apis_called","assessment"
+"2026-09-19 15:55:00.000 UTC","ali-admin","3.27.32.76","3","3","2","GetCallerIdentity, ListRoles, ListUsers","LOW"
+"2026-09-19 16:00:00.000 UTC","ali-admin","3.27.32.76","3","3","3","ListUsers, ListBuckets, DescribeInstances","LOW"

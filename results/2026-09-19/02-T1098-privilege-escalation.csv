@@ -1,0 +1,2 @@
+"grant_time","eventName","actor","target","policy_arn","sourceIPAddress","created_time","seconds_after_creation","assessment"
+"2026-09-19 16:04:34.000 UTC","AttachUserPolicy","ali-admin","hunt-test-user","arn:aws:iam::aws:policy/AdministratorAccess","3.27.32.76","2026-09-19 16:04:32.000 UTC","2","HIGH - admin policy"
